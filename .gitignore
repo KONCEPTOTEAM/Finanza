@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# prisma: el cliente de v7 es codigo TS generado dentro del arbol, no en node_modules.
+# Por eso `prisma generate` corre en postinstall y antes de build.
+/src/generated

@@ -1,0 +1,242 @@
+// Control de caja de Koncepto.
+//
+// Dos convenciones que atraviesan todo el modelo:
+//
+//  1. LA PLATA SE GUARDA EN CENTAVOS (Int), nunca en Float. USD 500 => 50000.
+//     Los float arrastran errores de redondeo y acá la plata tiene que cerrar exacta.
+//     Usá los helpers de src/lib/dinero.ts para entrar y salir.
+//
+//  2. NO HAY ENUMS. Vienen de la época de SQLite, que no los soporta. Postgres sí, pero los
+//     dejamos como String: las constantes de src/lib/constantes.ts ya dan el tipado en TS y
+//     migrarlos ahora implicaría tocar todas las queries a cambio de poco.
+//
+// La idea central del modelo: un GASTO y su PAGO son cosas distintas, igual que un
+// TRABAJO y su COBRO. Eso es lo que permite saber que la empresa tiene plata en la
+// caja aunque un socio haya puesto de su bolsillo — y viceversa.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+// El url NO va acá: Prisma 7 lo toma de prisma.config.ts.
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Socios
+// ---------------------------------------------------------------------------
+
+model Socio {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  nombre        String
+  passwordHash  String
+  // Sueldo mensual en centavos. Editable: hoy son USD 500 para los tres.
+  sueldoMensual Int      @default(50000)
+  activo        Boolean  @default(true)
+  orden         Int      @default(0)
+  creadoEn      DateTime @default(now())
+
+  // Gastos de la empresa que este socio pagó de su bolsillo (le suben la cuenta).
+  adelantos    PagoGasto[]
+  // Los gastos de tipo SUELDO dirigidos a este socio (le suben la cuenta).
+  sueldos      Gasto[]           @relation("SueldoDeSocio")
+  // Plata que la empresa le giró (le baja la cuenta).
+  giros        PagoASocio[]
+  recurrentes  GastoRecurrente[]
+  cierres      CierreMes[]
+  cobrosCargados Cobro[]         @relation("CobroCargadoPor")
+}
+
+// ---------------------------------------------------------------------------
+// Ingresos: Cliente -> Trabajo -> Cobros
+// ---------------------------------------------------------------------------
+
+model Cliente {
+  id       String   @id @default(cuid())
+  nombre   String   @unique
+  notas    String?
+  activo   Boolean  @default(true)
+  creadoEn DateTime @default(now())
+
+  trabajos      Trabajo[]
+  oportunidades Oportunidad[]
+}
+
+model Trabajo {
+  id          String   @id @default(cuid())
+  clienteId   String
+  cliente     Cliente  @relation(fields: [clienteId], references: [id], onDelete: Cascade)
+  descripcion String
+  // Monto facturado, en centavos.
+  monto       Int
+  // Fecha de facturación. El saldo pendiente NO se re-lista mes a mes:
+  // se arrastra solo mientras existan cobros por debajo del monto.
+  fecha       DateTime
+  notas       String?
+  creadoEn    DateTime @default(now())
+
+  cobros Cobro[]
+
+  // Si nació de una oportunidad del pipeline.
+  origen   Oportunidad? @relation(fields: [origenId], references: [id])
+  origenId String?      @unique
+
+  @@index([fecha])
+  @@index([clienteId])
+}
+
+model Cobro {
+  id        String   @id @default(cuid())
+  trabajoId String
+  trabajo   Trabajo  @relation(fields: [trabajoId], references: [id], onDelete: Cascade)
+  monto     Int
+  fecha     DateTime
+  // TRANSFERENCIA | EFECTIVO | OTRO — etiqueta informativa: hay una sola caja.
+  metodo    String   @default("TRANSFERENCIA")
+  notas     String?
+  creadoEn  DateTime @default(now())
+
+  cargadoPor   Socio?  @relation("CobroCargadoPor", fields: [cargadoPorId], references: [id])
+  cargadoPorId String?
+
+  @@index([fecha])
+  @@index([trabajoId])
+}
+
+// ---------------------------------------------------------------------------
+// Egresos: Gasto -> PagoGasto (con pagador)
+// ---------------------------------------------------------------------------
+
+model Gasto {
+  id       String   @id @default(cuid())
+  concepto String
+  // OPERATIVO | SUELDO
+  tipo     String   @default("OPERATIVO")
+  monto    Int
+  fecha    DateTime
+  // Los recurrentes se generan como borrador para que confirmes o corrijas el monto
+  // (Claude pasó de 100 a 200, Publicidad de 60 a 100: el monto no es fijo).
+  esBorrador Boolean @default(false)
+  notas      String?
+  creadoEn   DateTime @default(now())
+
+  // Solo cuando tipo = SUELDO: a qué socio le corresponde.
+  socio   Socio?  @relation("SueldoDeSocio", fields: [socioId], references: [id])
+  socioId String?
+
+  recurrente   GastoRecurrente? @relation(fields: [recurrenteId], references: [id], onDelete: SetNull)
+  recurrenteId String?
+
+  pagos PagoGasto[]
+
+  @@index([fecha])
+  @@index([tipo])
+  @@index([socioId])
+}
+
+// Quién puso la plata de un gasto. Un mismo gasto puede tener varios pagos con
+// distinto pagador: Publicidad de julio fueron 88 de Jorge + 12 de la empresa.
+model PagoGasto {
+  id      String   @id @default(cuid())
+  gastoId String
+  gasto   Gasto    @relation(fields: [gastoId], references: [id], onDelete: Cascade)
+  monto   Int
+  fecha   DateTime
+  // EMPRESA | SOCIO
+  pagador String   @default("EMPRESA")
+  // Obligatorio cuando pagador = SOCIO.
+  socio   Socio?   @relation(fields: [socioId], references: [id])
+  socioId String?
+  metodo  String   @default("TRANSFERENCIA")
+  notas   String?
+  creadoEn DateTime @default(now())
+
+  @@index([fecha])
+  @@index([gastoId])
+  @@index([socioId])
+}
+
+// Plata que la empresa le gira a un socio: le baja la cuenta corriente y sale de caja.
+// Cancela indistintamente sueldos devengados y adelantos (la cuenta es una sola).
+model PagoASocio {
+  id       String   @id @default(cuid())
+  socioId  String
+  socio    Socio    @relation(fields: [socioId], references: [id], onDelete: Cascade)
+  monto    Int
+  fecha    DateTime
+  metodo   String   @default("TRANSFERENCIA")
+  notas    String?
+  creadoEn DateTime @default(now())
+
+  @@index([fecha])
+  @@index([socioId])
+}
+
+// ---------------------------------------------------------------------------
+// Recurrentes (incluye los sueldos)
+// ---------------------------------------------------------------------------
+
+model GastoRecurrente {
+  id       String  @id @default(cuid())
+  concepto String
+  // OPERATIVO | SUELDO
+  tipo     String  @default("OPERATIVO")
+  // Monto sugerido al generar el borrador. Se actualiza con el último monto confirmado.
+  montoSugerido Int
+  activo        Boolean @default(true)
+  diaDelMes     Int     @default(1)
+
+  // Solo cuando tipo = SUELDO.
+  socio   Socio?  @relation(fields: [socioId], references: [id], onDelete: Cascade)
+  socioId String?
+
+  notas    String?
+  creadoEn DateTime @default(now())
+
+  generados Gasto[]
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline
+// ---------------------------------------------------------------------------
+
+model Oportunidad {
+  id     String @id @default(cuid())
+  nombre String
+  // Puede no existir todavía como cliente (Viñedo, El Faro, Desarrolladora G).
+  cliente   Cliente? @relation(fields: [clienteId], references: [id], onDelete: SetNull)
+  clienteId String?
+  monto     Int
+  confirmado Boolean @default(false)
+  // Seña pactada, en centavos. Al confirmar entra como primer cobro del trabajo.
+  sena      Int?
+  notas     String?
+  creadoEn  DateTime @default(now())
+
+  // Se llena cuando la oportunidad se convierte en trabajo facturable.
+  trabajo Trabajo?
+}
+
+// ---------------------------------------------------------------------------
+// Cierre de mes
+// ---------------------------------------------------------------------------
+
+model CierreMes {
+  id   String @id @default(cuid())
+  anio Int
+  mes  Int // 1-12
+
+  // Foto del saldo al cerrar, para el resumen histórico.
+  cajaFinal Int
+  notas     String?
+  cerradoEn DateTime @default(now())
+
+  cerradoPor   Socio  @relation(fields: [cerradoPorId], references: [id])
+  cerradoPorId String
+
+  @@unique([anio, mes])
+  @@index([anio, mes])
+}
