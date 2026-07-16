@@ -149,7 +149,7 @@ export default async function SocioPage({ params }: { params: Promise<{ id: stri
         <Card className="lg:col-span-2">
           <CardHeader
             titulo="Extracto"
-            descripcion="Todo lo que movió la cuenta, en orden. El saldo de la última línea es el de arriba."
+            descripcion="Cuenta corriente, en orden: lo que se le fue debiendo y lo que ya se le pagó. El saldo de la última línea es el de arriba."
           />
           {extracto.length === 0 ? (
             <Vacio>Todavía no hay movimientos en esta cuenta.</Vacio>
@@ -159,42 +159,45 @@ export default async function SocioPage({ params }: { params: Promise<{ id: stri
                 <tr>
                   <Th>Fecha</Th>
                   <Th>Concepto</Th>
-                  <Th alinear="derecha">Movimiento</Th>
+                  <Th alinear="derecha">Se le debe</Th>
+                  <Th alinear="derecha">Se le pagó</Th>
                   <Th alinear="derecha">Saldo</Th>
                   <Th />
                 </tr>
               </thead>
               <tbody>
-                {extracto.map((m) => (
-                  <tr key={m.clave}>
-                    <Td>
-                      <span className="text-tenue text-xs tabular">
-                        {m.fecha.toLocaleDateString("es-AR", {
-                          day: "2-digit",
-                          month: "2-digit",
-                          year: "numeric",
-                          timeZone: "UTC",
-                        })}
-                      </span>
-                    </Td>
-                    <Td>
-                      <span>{m.concepto}</span>
-                      {m.detalle && <p className="text-xs text-tenue mt-0.5">{m.detalle}</p>}
-                    </Td>
-                    <Td alinear="derecha">
-                      <span className={`tabular ${m.delta >= 0 ? "text-negativo" : "text-positivo"}`}>
-                        {m.delta >= 0 ? "+" : "−"}
-                        {formatearUSD(Math.abs(m.delta))}
-                      </span>
-                    </Td>
-                    <Td alinear="derecha">
-                      <Monto centavos={m.saldo} tono="auto" className="font-medium" />
-                    </Td>
-                    <Td alinear="derecha">
-                      {m.giroId && <BorrarGiro id={m.giroId} />}
-                    </Td>
-                  </tr>
-                ))}
+                {extracto.map((m, i) => {
+                  const esUltima = i === extracto.length - 1;
+                  return (
+                    <tr key={m.clave} className={esUltima ? "bg-background" : ""}>
+                      <Td>
+                        <span className="text-tenue text-xs tabular">
+                          {m.fecha.toLocaleDateString("es-AR", {
+                            day: "2-digit",
+                            month: "2-digit",
+                            year: "numeric",
+                            timeZone: "UTC",
+                          })}
+                        </span>
+                      </Td>
+                      <Td>
+                        <span>{m.concepto}</span>
+                        {m.detalle && <p className="text-xs text-tenue mt-0.5">{m.detalle}</p>}
+                      </Td>
+                      <Td alinear="derecha">
+                        {m.delta > 0 ? <Monto centavos={m.delta} /> : <span className="text-tenue">—</span>}
+                      </Td>
+                      <Td alinear="derecha">
+                        {m.delta < 0 ? <Monto centavos={-m.delta} /> : <span className="text-tenue">—</span>}
+                      </Td>
+                      <Td alinear="derecha">
+                        <Monto centavos={m.saldo} className={esUltima ? "font-semibold" : "text-tenue"} />
+                        {esUltima && <p className="text-xs text-tenue mt-0.5">saldo hoy</p>}
+                      </Td>
+                      <Td alinear="derecha">{m.giroId && <BorrarGiro id={m.giroId} />}</Td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </Tabla>
           )}
