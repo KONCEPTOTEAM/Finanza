@@ -399,3 +399,168 @@ export async function borrarCobro(
   if (resultado.ok) refrescar(resultado.clienteId);
   return resultado;
 }
+
+// ---------------------------------------------------------------------------
+// Cuotas (plan de pago de un trabajo)
+//
+// Una cuota es SOLO un cronograma: no toca la caja. Recién al cobrarla se crea un
+// Cobro real (que sí la mueve) y se linkea. Por eso acá no se reimplementa nada de
+// @/lib/calculos: la plata sigue viniendo únicamente de los Cobro.
+// ---------------------------------------------------------------------------
+
+/** Cantidad de cuotas: entero 2–60. Menos de 2 no es un plan; usá un cobro suelto. */
+const cantidadCuotas = z
+  .preprocess(
+    (v) => (typeof v === "string" && v.trim() !== "" ? Number(v.trim()) : NaN),
+    z.number({ error: "Elegí en cuántas cuotas." }),
+  )
+  .refine((n) => Number.isInteger(n) && n >= 2 && n <= 60, {
+    error: "Tiene que ser un número entero entre 2 y 60.",
+  });
+
+/** Divide un total en centavos en `n` cuotas lo más parejas posible. Suman el total exacto. */
+function dividirEnCuotas(total: number, n: number): number[] {
+  const base = Math.floor(total / n);
+  const resto = total - base * n; // 0..n-1: el sobrante en centavos se reparte de a uno.
+  return Array.from({ length: n }, (_, i) => base + (i < resto ? 1 : 0));
+}
+
+/** `f` + `meses`, clampeando al último día si el mes destino es más corto (31 ene → 28/29 feb). */
+function sumarMeses(f: Date, meses: number): Date {
+  const y = f.getUTCFullYear();
+  const m = f.getUTCMonth();
+  const ultimoDia = new Date(Date.UTC(y, m + meses + 1, 0)).getUTCDate();
+  return new Date(Date.UTC(y, m + meses, Math.min(f.getUTCDate(), ultimoDia)));
+}
+
+export async function generarCuotas(
+  _estado: EstadoFormulario | undefined,
+  formData: FormData,
+): Promise<EstadoFormulario> {
+  await verificarSesion();
+
+  const parsed = z
+    .object({ trabajoId: idRequerido, cantidad: cantidadCuotas, primerVencimiento: fecha })
+    .safeParse({
+      trabajoId: formData.get("trabajoId"),
+      cantidad: formData.get("cantidad"),
+      primerVencimiento: formData.get("primerVencimiento"),
+    });
+  if (!parsed.success) return erroresDe(parsed.error);
+
+  const { trabajoId, cantidad, primerVencimiento } = parsed.data;
+
+  const resultado = await prisma.$transaction(async (tx): Promise<Resultado> => {
+    const trabajo = await tx.trabajo.findUnique({
+      where: { id: trabajoId },
+      select: { clienteId: true, monto: true, _count: { select: { cobros: true, cuotas: true } } },
+    });
+    if (!trabajo) return { error: "Ese trabajo ya no existe." };
+    if (trabajo._count.cuotas > 0) {
+      return { error: "Este trabajo ya tiene un plan de cuotas. Borralo para rehacerlo." };
+    }
+    if (trabajo._count.cobros > 0) {
+      return { error: "Este trabajo ya tiene cobros sueltos: el plan de cuotas es para dividir un trabajo desde cero." };
+    }
+
+    await tx.cuota.createMany({
+      data: dividirEnCuotas(trabajo.monto, cantidad).map((monto, i) => ({
+        trabajoId,
+        numero: i + 1,
+        monto,
+        vencimiento: sumarMeses(primerVencimiento, i),
+      })),
+    });
+    return { ok: true, clienteId: trabajo.clienteId };
+  });
+
+  if (resultado.ok) refrescar(resultado.clienteId);
+  return resultado;
+}
+
+export async function cobrarCuota(
+  _estado: EstadoFormulario | undefined,
+  formData: FormData,
+): Promise<EstadoFormulario> {
+  const { socioId } = await verificarSesion();
+
+  const parsed = z
+    .object({ id: idRequerido, fecha, metodo })
+    .safeParse({ id: formData.get("id"), fecha: formData.get("fecha"), metodo: formData.get("metodo") });
+  if (!parsed.success) return erroresDe(parsed.error);
+
+  const { id, fecha: fechaCobro, metodo: metodoCobro } = parsed.data;
+
+  // Marcar la cuota + crear el Cobro van juntos: si quedaran sueltos, dos clicks
+  // simultáneos crearían dos cobros para la misma cuota y sobrecobrarían el trabajo.
+  const resultado = await prisma.$transaction(async (tx): Promise<Resultado> => {
+    const cuota = await tx.cuota.findUnique({
+      where: { id },
+      select: {
+        monto: true,
+        numero: true,
+        cobroId: true,
+        trabajo: {
+          select: { id: true, clienteId: true, monto: true, cobros: { select: { monto: true } } },
+        },
+      },
+    });
+    if (!cuota) return { error: "Esa cuota ya no existe." };
+    if (cuota.cobroId) return { error: "Esa cuota ya está cobrada." };
+
+    // El cobro se valida contra SU mes, no el del trabajo: cobrar una cuota de un mes ya
+    // cerrado no debería reabrirlo.
+    const bloqueo = await mesBloqueado(tx, fechaCobro);
+    if (bloqueo) return { errores: { fecha: [bloqueo] } };
+
+    const cobrado = cuota.trabajo.cobros.reduce((acc, c) => acc + c.monto, 0);
+    const pendiente = cuota.trabajo.monto - cobrado;
+    if (cuota.monto > pendiente) {
+      return {
+        error: `La cuota ${cuota.numero} (${formatearUSD(cuota.monto)}) supera el saldo del trabajo: quedan ${formatearUSD(pendiente)}.`,
+      };
+    }
+
+    const cobro = await tx.cobro.create({
+      data: {
+        trabajoId: cuota.trabajo.id,
+        monto: cuota.monto,
+        fecha: fechaCobro,
+        metodo: metodoCobro,
+        notas: `Cuota ${cuota.numero}`,
+        cargadoPorId: socioId,
+      },
+    });
+    await tx.cuota.update({ where: { id }, data: { cobroId: cobro.id } });
+    return { ok: true, clienteId: cuota.trabajo.clienteId };
+  });
+
+  if (resultado.ok) refrescar(resultado.clienteId);
+  return resultado;
+}
+
+export async function borrarPlanCuotas(
+  _estado: EstadoFormulario | undefined,
+  formData: FormData,
+): Promise<EstadoFormulario> {
+  await verificarSesion();
+
+  const parsed = z.object({ trabajoId: idRequerido }).safeParse({ trabajoId: formData.get("trabajoId") });
+  if (!parsed.success) return erroresDe(parsed.error);
+
+  const resultado = await prisma.$transaction(async (tx): Promise<Resultado> => {
+    const trabajo = await tx.trabajo.findUnique({
+      where: { id: parsed.data.trabajoId },
+      select: { clienteId: true },
+    });
+    if (!trabajo) return { error: "Ese trabajo ya no existe." };
+
+    // Solo las pendientes: una cuota cobrada tiene un Cobro real detrás. Para sacarla,
+    // borrá el cobro (que la reabre por la FK SetNull) y recién ahí desaparece del plan.
+    await tx.cuota.deleteMany({ where: { trabajoId: parsed.data.trabajoId, cobroId: null } });
+    return { ok: true, clienteId: trabajo.clienteId };
+  });
+
+  if (resultado.ok) refrescar(resultado.clienteId);
+  return resultado;
+}

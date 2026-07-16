@@ -3,11 +3,14 @@
 import { useActionState, useState } from "react";
 import {
   borrarCobro,
+  borrarPlanCuotas,
   borrarTrabajo,
+  cobrarCuota,
   crearTrabajo,
   desactivarCliente,
   editarCliente,
   editarTrabajo,
+  generarCuotas,
   registrarCobro,
 } from "../acciones";
 import {
@@ -16,7 +19,9 @@ import {
   Card,
   CardHeader,
   ErrorAviso,
+  Etiqueta,
   Input,
+  Monto,
   Select,
   Textarea,
 } from "@/components/ui";
@@ -355,5 +360,207 @@ export function BorrarCobro({ id, monto }: { id: string; monto: number }) {
     >
       Borrar
     </BotonAccion>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Cuotas
+// ---------------------------------------------------------------------------
+
+export type CuotaVista = {
+  id: string;
+  numero: number;
+  monto: number;
+  vencimientoTexto: string;
+  cobrada: boolean;
+  cobradaTexto: string | null;
+};
+
+/**
+ * El plan de cuotas de un trabajo. Sin cuotas todavía, ofrece dividir (solo si el
+ * trabajo está limpio, sin cobros sueltos). Con cuotas, muestra el cronograma.
+ */
+export function PlanCuotas({
+  trabajoId,
+  monto,
+  tieneCobros,
+  cuotas,
+  hoy,
+}: {
+  trabajoId: string;
+  monto: number;
+  tieneCobros: boolean;
+  cuotas: CuotaVista[];
+  hoy: string;
+}) {
+  if (cuotas.length === 0) {
+    if (tieneCobros) return null;
+    return <DividirEnCuotas trabajoId={trabajoId} monto={monto} hoy={hoy} />;
+  }
+
+  return (
+    <div className="mt-3 border-l border-borde pl-3">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs font-medium text-tenue uppercase tracking-wide">
+          Plan de {cuotas.length} cuotas
+        </p>
+        <BorrarPlanCuotas trabajoId={trabajoId} />
+      </div>
+      <ul className="mt-2 space-y-1.5">
+        {cuotas.map((c) => (
+          <FilaCuota key={c.id} cuota={c} total={cuotas.length} hoy={hoy} />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function DividirEnCuotas({
+  trabajoId,
+  monto,
+  hoy,
+}: {
+  trabajoId: string;
+  monto: number;
+  hoy: string;
+}) {
+  const [abierto, setAbierto] = useState(false);
+  const [cantidad, setCantidad] = useState(3);
+  const [estado, accion, pendiente] = useActionState(generarCuotas, undefined);
+
+  if (!abierto) {
+    return (
+      <button
+        type="button"
+        onClick={() => setAbierto(true)}
+        className="mt-3 text-xs text-tenue hover:text-foreground transition"
+      >
+        Dividir en cuotas
+      </button>
+    );
+  }
+
+  const porCuota = cantidad >= 2 ? Math.floor(monto / cantidad) : 0;
+
+  return (
+    <form action={accion} className="mt-3 border-l border-borde pl-3 space-y-3">
+      {estado?.error && <ErrorAviso>{estado.error}</ErrorAviso>}
+      <input type="hidden" name="trabajoId" value={trabajoId} />
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Campo etiqueta="Cantidad de cuotas" error={estado?.errores?.cantidad}>
+          <Input
+            name="cantidad"
+            type="number"
+            min={2}
+            max={60}
+            value={cantidad}
+            onChange={(e) => setCantidad(Number(e.target.value) || 0)}
+          />
+        </Campo>
+        <Campo
+          etiqueta="Vence la primera"
+          error={estado?.errores?.primerVencimiento}
+          ayuda="Las siguientes, un mes después cada una."
+        >
+          <Input name="primerVencimiento" type="date" defaultValue={hoy} />
+        </Campo>
+      </div>
+
+      <p className="text-xs text-tenue">
+        {cantidad >= 2
+          ? `${cantidad} cuotas de ~${formatearUSD(porCuota)} (suman el total exacto).`
+          : "Elegí al menos 2 cuotas."}
+      </p>
+
+      <div className="flex gap-2">
+        <Boton disabled={pendiente}>{pendiente ? "Generando…" : "Generar cuotas"}</Boton>
+        <Boton type="button" variante="secundario" onClick={() => setAbierto(false)}>
+          Cancelar
+        </Boton>
+      </div>
+    </form>
+  );
+}
+
+function FilaCuota({ cuota, total, hoy }: { cuota: CuotaVista; total: number; hoy: string }) {
+  const [abierto, setAbierto] = useState(false);
+  const [estado, accion, pendiente] = useActionState(cobrarCuota, undefined);
+
+  return (
+    <li className="text-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-tenue text-xs">
+          Cuota {cuota.numero}/{total} · vence {cuota.vencimientoTexto}
+        </span>
+        <span className="flex items-center gap-3">
+          <Monto centavos={cuota.monto} tono={cuota.cobrada ? "positivo" : "tenue"} />
+          {cuota.cobrada ? (
+            <Etiqueta tono="positivo">Cobrada {cuota.cobradaTexto}</Etiqueta>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setAbierto((v) => !v)}
+              className="text-xs text-acento hover:opacity-70 transition"
+            >
+              {abierto ? "Cancelar" : "Cobrar"}
+            </button>
+          )}
+        </span>
+      </div>
+
+      {!cuota.cobrada && abierto && (
+        <form action={accion} className="mt-2 space-y-2">
+          {estado?.error && <ErrorAviso>{estado.error}</ErrorAviso>}
+          <input type="hidden" name="id" value={cuota.id} />
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Campo etiqueta="Fecha del cobro" error={estado?.errores?.fecha}>
+              <Input name="fecha" type="date" defaultValue={hoy} />
+            </Campo>
+            <Campo etiqueta="Método" error={estado?.errores?.metodo}>
+              <Select name="metodo" defaultValue={METODO.TRANSFERENCIA}>
+                {Object.values(METODO).map((m) => (
+                  <option key={m} value={m}>
+                    {ETIQUETA_METODO[m]}
+                  </option>
+                ))}
+              </Select>
+            </Campo>
+          </div>
+          <Boton disabled={pendiente}>
+            {pendiente ? "Cobrando…" : `Cobrar ${formatearUSD(cuota.monto)}`}
+          </Boton>
+        </form>
+      )}
+    </li>
+  );
+}
+
+function BorrarPlanCuotas({ trabajoId }: { trabajoId: string }) {
+  const [estado, accion, pendiente] = useActionState(borrarPlanCuotas, undefined);
+
+  return (
+    <form
+      action={accion}
+      onSubmit={(e) => {
+        if (
+          !window.confirm(
+            "¿Borrar las cuotas pendientes de este plan? Las ya cobradas se mantienen.",
+          )
+        ) {
+          e.preventDefault();
+        }
+      }}
+    >
+      <input type="hidden" name="trabajoId" value={trabajoId} />
+      <button
+        type="submit"
+        disabled={pendiente}
+        className="text-xs text-tenue hover:text-negativo transition disabled:opacity-50"
+      >
+        Borrar plan
+      </button>
+      {estado?.error && <p className="text-xs text-negativo mt-1">{estado.error}</p>}
+    </form>
   );
 }
