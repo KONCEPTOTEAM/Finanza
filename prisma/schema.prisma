@@ -187,7 +187,8 @@ model GastoRecurrente {
   // Monto sugerido al generar el borrador. Se actualiza con el último monto confirmado.
   montoSugerido Int
   activo        Boolean @default(true)
-  diaDelMes     Int     @default(1)
+  // Día de pago fijo (1–31). Opcional: null = sin día fijo, el borrador cae el día 1.
+  diaDelMes     Int?
 
   // Solo cuando tipo = SUELDO.
   socio   Socio?  @relation(fields: [socioId], references: [id], onDelete: Cascade)

@@ -15,7 +15,7 @@ export type ValoresRecurrente = {
   concepto: string;
   socioId: string;
   montoSugerido: number;
-  diaDelMes: number;
+  diaDelMes: number | null;
   notas: string;
 };
 
@@ -99,16 +99,17 @@ export function FormularioRecurrente({
         </Campo>
 
         <Campo
-          etiqueta="Día del mes"
+          etiqueta="Día del mes (opcional)"
           error={err?.diaDelMes}
-          ayuda="Si el mes es más corto, cae el último día."
+          ayuda="Ej: 14 si se paga todos los 14. En blanco = sin día fijo (cae el día 1). Si el mes es más corto, cae el último día."
         >
           <Input
             name="diaDelMes"
             type="number"
             min={1}
             max={31}
-            defaultValue={valores?.diaDelMes ?? 1}
+            defaultValue={valores?.diaDelMes ?? ""}
+            placeholder="Sin día fijo"
           />
         </Campo>
       </div>

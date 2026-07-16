@@ -19,12 +19,19 @@ import { cobertura } from "./ocupadas";
 
 const recortar = (v: unknown) => (typeof v === "string" ? v.trim() : "");
 
-const diaDelMes = z
-  .preprocess(recortar, z.string().min(1, { error: "Elegí un día del mes." }))
-  .pipe(z.coerce.number({ error: "Tiene que ser un número." }))
-  .refine((n) => Number.isInteger(n) && n >= 1 && n <= 31, {
-    error: "Tiene que ser un día entre 1 y 31.",
-  });
+// Opcional: en blanco = sin día fijo (el borrador cae el día 1). Si hay valor, 1–31.
+const diaDelMes = z.preprocess(
+  (v) => {
+    const s = typeof v === "string" ? v.trim() : "";
+    return s === "" ? null : Number(s);
+  },
+  z
+    .number({ error: "Tiene que ser un número." })
+    .refine((n) => Number.isInteger(n) && n >= 1 && n <= 31, {
+      error: "Tiene que ser un día entre 1 y 31.",
+    })
+    .nullable(),
+);
 
 const entero = (min: number, max: number) =>
   z
@@ -287,7 +294,8 @@ export async function generarMes(
           concepto: p.concepto,
           tipo: p.tipo,
           monto: p.montoSugerido,
-          fecha: new Date(Date.UTC(anio, mes - 1, Math.min(p.diaDelMes, ultimoDia))),
+          // Sin día fijo (null) → cae el día 1. Con día fijo → ese día, o el último si el mes es más corto.
+          fecha: new Date(Date.UTC(anio, mes - 1, Math.min(p.diaDelMes ?? 1, ultimoDia))),
           esBorrador: true,
           // Los sueldos se generan sin PagoGasto: el giro al socio se carga desde /socios.
           socioId: p.tipo === TIPO_GASTO.SUELDO ? p.socioId : null,

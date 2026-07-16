@@ -23,7 +23,7 @@ type Plantilla = {
   id: string;
   concepto: string;
   montoSugerido: number;
-  diaDelMes: number;
+  diaDelMes: number | null;
   activo: boolean;
   notas: string | null;
   socio: { nombre: string } | null;
@@ -178,7 +178,7 @@ function GrupoPlantillas({
                     <Monto centavos={p.montoSugerido} tono={p.activo ? "neutro" : "tenue"} />
                   </Td>
                   <Td alinear="derecha" className="tabular text-tenue">
-                    {p.diaDelMes}
+                    {p.diaDelMes ?? "—"}
                   </Td>
                   <Td>
                     {p.activo ? (
