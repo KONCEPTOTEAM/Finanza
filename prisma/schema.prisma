@@ -79,6 +79,8 @@ model Trabajo {
   creadoEn    DateTime @default(now())
 
   cobros Cobro[]
+  // Plan de cuotas opcional (cronograma). No es plata hasta que cada cuota se cobra.
+  cuotas Cuota[]
 
   // Si nació de una oportunidad del pipeline.
   origen   Oportunidad? @relation(fields: [origenId], references: [id])
@@ -102,7 +104,33 @@ model Cobro {
   cargadoPor   Socio?  @relation("CobroCargadoPor", fields: [cargadoPorId], references: [id])
   cargadoPorId String?
 
+  // Si este cobro salda una cuota de un plan (lado inverso; la FK vive en Cuota).
+  cuota Cuota?
+
   @@index([fecha])
+  @@index([trabajoId])
+}
+
+// ---------------------------------------------------------------------------
+// Cuotas: plan de pago de un trabajo. Es SOLO un cronograma, no es plata.
+//
+// Una cuota no toca la caja: recién al cobrarla se crea un Cobro real (que sí
+// mueve la caja) y se linkea acá. cobroId = null => pendiente. Si ese Cobro se
+// borra, la FK es SetNull y la cuota vuelve a pendiente sola.
+// ---------------------------------------------------------------------------
+
+model Cuota {
+  id          String   @id @default(cuid())
+  trabajoId   String
+  trabajo     Trabajo  @relation(fields: [trabajoId], references: [id], onDelete: Cascade)
+  // 1..N dentro del plan, para mostrar "Cuota 2 de 3".
+  numero      Int
+  monto       Int
+  vencimiento DateTime
+  cobro       Cobro?   @relation(fields: [cobroId], references: [id], onDelete: SetNull)
+  cobroId     String?  @unique
+  creadoEn    DateTime @default(now())
+
   @@index([trabajoId])
 }
 

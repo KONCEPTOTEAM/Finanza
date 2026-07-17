@@ -19,6 +19,7 @@ import {
   EditarTrabajo,
   NuevoCobro,
   NuevoTrabajo,
+  PlanCuotas,
   type TrabajoVista,
 } from "./formularios";
 
@@ -58,6 +59,10 @@ export default async function ClientePage({ params }: { params: Promise<{ id: st
             orderBy: { fecha: "asc" },
             include: { cargadoPor: { select: { nombre: true } } },
           },
+          cuotas: {
+            orderBy: { numero: "asc" },
+            include: { cobro: { select: { fecha: true } } },
+          },
         },
       },
     },
@@ -82,6 +87,14 @@ export default async function ClientePage({ params }: { params: Promise<{ id: st
         metodo: c.metodo as Metodo,
         notas: c.notas,
         cargadoPor: c.cargadoPor?.nombre ?? null,
+      })),
+      cuotas: t.cuotas.map((c) => ({
+        id: c.id,
+        numero: c.numero,
+        monto: c.monto,
+        vencimientoTexto: dia(c.vencimiento),
+        cobrada: c.cobroId !== null,
+        cobradaTexto: c.cobro ? dia(c.cobro.fecha) : null,
       })),
     };
   });
@@ -216,6 +229,14 @@ export default async function ClientePage({ params }: { params: Promise<{ id: st
                     ))}
                   </ul>
                 )}
+
+                <PlanCuotas
+                  trabajoId={t.id}
+                  monto={t.monto}
+                  tieneCobros={t.cobros.length > 0}
+                  cuotas={t.cuotas}
+                  hoy={hoy}
+                />
               </li>
             ))}
           </ul>
