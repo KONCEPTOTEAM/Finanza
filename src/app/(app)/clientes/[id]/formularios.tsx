@@ -25,7 +25,7 @@ import {
   Select,
   Textarea,
 } from "@/components/ui";
-import { formatearUSD } from "@/lib/dinero";
+import { aUSD, formatearUSD } from "@/lib/dinero";
 import { ETIQUETA_METODO, METODO } from "@/lib/constantes";
 import type { EstadoFormulario } from "@/lib/validacion";
 
@@ -371,31 +371,30 @@ export type CuotaVista = {
   id: string;
   numero: number;
   monto: number;
+  cobrado: number;
+  pendiente: number;
+  estado: "pendiente" | "parcial" | "cobrada";
   vencimientoTexto: string;
-  cobrada: boolean;
-  cobradaTexto: string | null;
 };
 
 /**
- * El plan de cuotas de un trabajo. Sin cuotas todavía, ofrece dividir (solo si el
- * trabajo está limpio, sin cobros sueltos). Con cuotas, muestra el cronograma.
+ * El plan de cuotas de un trabajo. Sin cuotas todavía, ofrece dividir lo que falta
+ * cobrar (aunque ya haya un anticipo). Con cuotas, muestra el cronograma.
  */
 export function PlanCuotas({
   trabajoId,
-  monto,
-  tieneCobros,
+  pendiente,
   cuotas,
   hoy,
 }: {
   trabajoId: string;
-  monto: number;
-  tieneCobros: boolean;
+  pendiente: number;
   cuotas: CuotaVista[];
   hoy: string;
 }) {
   if (cuotas.length === 0) {
-    if (tieneCobros) return null;
-    return <DividirEnCuotas trabajoId={trabajoId} monto={monto} hoy={hoy} />;
+    if (pendiente <= 0) return null;
+    return <DividirEnCuotas trabajoId={trabajoId} pendiente={pendiente} hoy={hoy} />;
   }
 
   return (
@@ -417,16 +416,18 @@ export function PlanCuotas({
 
 function DividirEnCuotas({
   trabajoId,
-  monto,
+  pendiente,
   hoy,
 }: {
   trabajoId: string;
-  monto: number;
+  pendiente: number;
   hoy: string;
 }) {
   const [abierto, setAbierto] = useState(false);
+  const [modo, setModo] = useState<"iguales" | "manual">("iguales");
   const [cantidad, setCantidad] = useState(3);
-  const [estado, accion, pendiente] = useActionState(generarCuotas, undefined);
+  const [montos, setMontos] = useState<string[]>(["", "", ""]);
+  const [estado, accion, pendienteAccion] = useActionState(generarCuotas, undefined);
 
   if (!abierto) {
     return (
@@ -440,23 +441,40 @@ function DividirEnCuotas({
     );
   }
 
-  const porCuota = cantidad >= 2 ? Math.floor(monto / cantidad) : 0;
+  // En manual, la cantidad de filas manda: sincronizamos el array de montos con ella.
+  function cambiarCantidad(n: number) {
+    setCantidad(n);
+    if (n >= 1 && n <= 60) {
+      setMontos((prev) => {
+        const arr = prev.slice(0, n);
+        while (arr.length < n) arr.push("");
+        return arr;
+      });
+    }
+  }
+
+  const iguales = modo === "iguales";
+  const porCuota = cantidad >= 2 ? Math.floor(pendiente / cantidad) : 0;
+  const sumaManual = montos.reduce((acc, s) => acc + Math.round((Number(s) || 0) * 100), 0);
+  const cuadra = sumaManual === pendiente;
 
   return (
     <form action={accion} className="mt-3 border-l border-borde pl-3 space-y-3">
       {estado?.error && <ErrorAviso>{estado.error}</ErrorAviso>}
       <input type="hidden" name="trabajoId" value={trabajoId} />
+      <input type="hidden" name="modo" value={modo} />
+
+      <p className="text-xs text-tenue">
+        A repartir:{" "}
+        <span className="tabular text-foreground">{formatearUSD(pendiente)}</span> pendientes.
+      </p>
 
       <div className="grid gap-3 sm:grid-cols-2">
-        <Campo etiqueta="Cantidad de cuotas" error={estado?.errores?.cantidad}>
-          <Input
-            name="cantidad"
-            type="number"
-            min={2}
-            max={60}
-            value={cantidad}
-            onChange={(e) => setCantidad(Number(e.target.value) || 0)}
-          />
+        <Campo etiqueta="Reparto">
+          <Select value={modo} onChange={(e) => setModo(e.target.value as "iguales" | "manual")}>
+            <option value="iguales">Cuotas iguales</option>
+            <option value="manual">Montos a mano</option>
+          </Select>
         </Campo>
         <Campo
           etiqueta="Vence la primera"
@@ -467,14 +485,54 @@ function DividirEnCuotas({
         </Campo>
       </div>
 
-      <p className="text-xs text-tenue">
-        {cantidad >= 2
-          ? `${cantidad} cuotas de ~${formatearUSD(porCuota)} (suman el total exacto).`
-          : "Elegí al menos 2 cuotas."}
-      </p>
+      <Campo etiqueta="Cantidad de cuotas" error={estado?.errores?.cantidad}>
+        <Input
+          name="cantidad"
+          type="number"
+          min={2}
+          max={60}
+          value={cantidad}
+          onChange={(e) => cambiarCantidad(Number(e.target.value) || 0)}
+        />
+      </Campo>
+
+      {iguales ? (
+        <p className="text-xs text-tenue">
+          {cantidad >= 2
+            ? `${cantidad} cuotas de ~${formatearUSD(porCuota)} (suman lo pendiente exacto).`
+            : "Elegí al menos 2 cuotas."}
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {montos.map((m, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <span className="text-xs text-tenue w-16 shrink-0">Cuota {i + 1}</span>
+              <Input
+                name="montoCuota"
+                inputMode="decimal"
+                placeholder="0"
+                value={m}
+                onChange={(e) =>
+                  setMontos((prev) => prev.map((x, j) => (j === i ? e.target.value : x)))
+                }
+              />
+            </div>
+          ))}
+          <p className={`text-xs ${cuadra ? "text-positivo" : "text-tenue"}`}>
+            Suman {formatearUSD(sumaManual)} de {formatearUSD(pendiente)}
+            {cuadra
+              ? " ✓"
+              : sumaManual < pendiente
+                ? ` · faltan ${formatearUSD(pendiente - sumaManual)}`
+                : ` · se pasan ${formatearUSD(sumaManual - pendiente)}`}
+          </p>
+        </div>
+      )}
 
       <div className="flex gap-2">
-        <Boton disabled={pendiente}>{pendiente ? "Generando…" : "Generar cuotas"}</Boton>
+        <Boton disabled={pendienteAccion || (!iguales && !cuadra)}>
+          {pendienteAccion ? "Generando…" : "Generar cuotas"}
+        </Boton>
         <Boton type="button" variante="secundario" onClick={() => setAbierto(false)}>
           Cancelar
         </Boton>
@@ -487,6 +545,8 @@ function FilaCuota({ cuota, total, hoy }: { cuota: CuotaVista; total: number; ho
   const [abierto, setAbierto] = useState(false);
   const [estado, accion, pendiente] = useActionState(cobrarCuota, undefined);
 
+  const cobrable = cuota.estado !== "cobrada";
+
   return (
     <li className="text-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -494,10 +554,12 @@ function FilaCuota({ cuota, total, hoy }: { cuota: CuotaVista; total: number; ho
           Cuota {cuota.numero}/{total} · vence {cuota.vencimientoTexto}
         </span>
         <span className="flex items-center gap-3">
-          <Monto centavos={cuota.monto} tono={cuota.cobrada ? "positivo" : "tenue"} />
-          {cuota.cobrada ? (
-            <Etiqueta tono="positivo">Cobrada {cuota.cobradaTexto}</Etiqueta>
-          ) : (
+          <Monto centavos={cuota.monto} tono={cuota.estado === "cobrada" ? "positivo" : "tenue"} />
+          {cuota.estado === "cobrada" && <Etiqueta tono="positivo">Cobrada</Etiqueta>}
+          {cuota.estado === "parcial" && (
+            <Etiqueta tono="alerta">Faltan {formatearUSD(cuota.pendiente)}</Etiqueta>
+          )}
+          {cobrable && (
             <button
               type="button"
               onClick={() => setAbierto((v) => !v)}
@@ -509,12 +571,15 @@ function FilaCuota({ cuota, total, hoy }: { cuota: CuotaVista; total: number; ho
         </span>
       </div>
 
-      {!cuota.cobrada && abierto && (
+      {cobrable && abierto && (
         <form action={accion} className="mt-2 space-y-2">
           {estado?.error && <ErrorAviso>{estado.error}</ErrorAviso>}
           <input type="hidden" name="id" value={cuota.id} />
-          <div className="grid gap-2 sm:grid-cols-2">
-            <Campo etiqueta="Fecha del cobro" error={estado?.errores?.fecha}>
+          <div className="grid gap-2 sm:grid-cols-3">
+            <Campo etiqueta="Monto (USD)" error={estado?.errores?.monto}>
+              <Input name="monto" inputMode="decimal" defaultValue={String(aUSD(cuota.pendiente))} />
+            </Campo>
+            <Campo etiqueta="Fecha" error={estado?.errores?.fecha}>
               <Input name="fecha" type="date" defaultValue={hoy} />
             </Campo>
             <Campo etiqueta="Método" error={estado?.errores?.metodo}>
@@ -527,9 +592,7 @@ function FilaCuota({ cuota, total, hoy }: { cuota: CuotaVista; total: number; ho
               </Select>
             </Campo>
           </div>
-          <Boton disabled={pendiente}>
-            {pendiente ? "Cobrando…" : `Cobrar ${formatearUSD(cuota.monto)}`}
-          </Boton>
+          <Boton disabled={pendiente}>{pendiente ? "Cobrando…" : "Registrar cobro"}</Boton>
         </form>
       )}
     </li>
@@ -545,7 +608,7 @@ function BorrarPlanCuotas({ trabajoId }: { trabajoId: string }) {
       onSubmit={(e) => {
         if (
           !window.confirm(
-            "¿Borrar las cuotas pendientes de este plan? Las ya cobradas se mantienen.",
+            "¿Borrar las cuotas de este plan que todavía no recibieron plata? Las que ya tienen cobros se mantienen.",
           )
         ) {
           e.preventDefault();

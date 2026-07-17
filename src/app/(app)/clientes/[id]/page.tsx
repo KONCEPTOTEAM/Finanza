@@ -61,7 +61,7 @@ export default async function ClientePage({ params }: { params: Promise<{ id: st
           },
           cuotas: {
             orderBy: { numero: "asc" },
-            include: { cobro: { select: { fecha: true } } },
+            include: { cobros: { select: { monto: true } } },
           },
         },
       },
@@ -88,14 +88,22 @@ export default async function ClientePage({ params }: { params: Promise<{ id: st
         notas: c.notas,
         cargadoPor: c.cargadoPor?.nombre ?? null,
       })),
-      cuotas: t.cuotas.map((c) => ({
-        id: c.id,
-        numero: c.numero,
-        monto: c.monto,
-        vencimientoTexto: dia(c.vencimiento),
-        cobrada: c.cobroId !== null,
-        cobradaTexto: c.cobro ? dia(c.cobro.fecha) : null,
-      })),
+      cuotas: t.cuotas.map((c) => {
+        const cobrado = c.cobros.reduce((acc, x) => acc + x.monto, 0);
+        const pendiente = c.monto - cobrado;
+        return {
+          id: c.id,
+          numero: c.numero,
+          monto: c.monto,
+          cobrado,
+          pendiente,
+          estado: (pendiente <= 0 ? "cobrada" : cobrado > 0 ? "parcial" : "pendiente") as
+            | "cobrada"
+            | "parcial"
+            | "pendiente",
+          vencimientoTexto: dia(c.vencimiento),
+        };
+      }),
     };
   });
 
@@ -232,8 +240,7 @@ export default async function ClientePage({ params }: { params: Promise<{ id: st
 
                 <PlanCuotas
                   trabajoId={t.id}
-                  monto={t.monto}
-                  tieneCobros={t.cobros.length > 0}
+                  pendiente={t.pendiente}
                   cuotas={t.cuotas}
                   hoy={hoy}
                 />

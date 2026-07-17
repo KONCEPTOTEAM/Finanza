@@ -403,20 +403,16 @@ export async function borrarCobro(
 // ---------------------------------------------------------------------------
 // Cuotas (plan de pago de un trabajo)
 //
-// Una cuota es SOLO un cronograma: no toca la caja. Recién al cobrarla se crea un
-// Cobro real (que sí la mueve) y se linkea. Por eso acá no se reimplementa nada de
-// @/lib/calculos: la plata sigue viniendo únicamente de los Cobro.
+// Una cuota es SOLO un cronograma: no toca la caja. Los cobros se le imputan y su
+// estado se deriva (cobrado = suma de sus cobros). Por eso acá no se reimplementa
+// nada de @/lib/calculos: la plata sigue viniendo únicamente de los Cobro.
 // ---------------------------------------------------------------------------
 
-/** Cantidad de cuotas: entero 2–60. Menos de 2 no es un plan; usá un cobro suelto. */
-const cantidadCuotas = z
-  .preprocess(
-    (v) => (typeof v === "string" && v.trim() !== "" ? Number(v.trim()) : NaN),
-    z.number({ error: "Elegí en cuántas cuotas." }),
-  )
-  .refine((n) => Number.isInteger(n) && n >= 2 && n <= 60, {
-    error: "Tiene que ser un número entero entre 2 y 60.",
-  });
+/** USD "1.234,5" del form -> centavos. NaN/≤0 los filtra el llamador. */
+function centavosDe(v: FormDataEntryValue): number {
+  const s = typeof v === "string" ? v.trim() : "";
+  return Math.round(Number(s) * 100);
+}
 
 /** Divide un total en centavos en `n` cuotas lo más parejas posible. Suman el total exacto. */
 function dividirEnCuotas(total: number, n: number): number[] {
@@ -440,31 +436,68 @@ export async function generarCuotas(
   await verificarSesion();
 
   const parsed = z
-    .object({ trabajoId: idRequerido, cantidad: cantidadCuotas, primerVencimiento: fecha })
+    .object({
+      trabajoId: idRequerido,
+      modo: z.enum(["iguales", "manual"], { error: "Elegí cómo dividir." }),
+      primerVencimiento: fecha,
+    })
     .safeParse({
       trabajoId: formData.get("trabajoId"),
-      cantidad: formData.get("cantidad"),
+      modo: formData.get("modo"),
       primerVencimiento: formData.get("primerVencimiento"),
     });
   if (!parsed.success) return erroresDe(parsed.error);
 
-  const { trabajoId, cantidad, primerVencimiento } = parsed.data;
+  const { trabajoId, modo, primerVencimiento } = parsed.data;
 
   const resultado = await prisma.$transaction(async (tx): Promise<Resultado> => {
     const trabajo = await tx.trabajo.findUnique({
       where: { id: trabajoId },
-      select: { clienteId: true, monto: true, _count: { select: { cobros: true, cuotas: true } } },
+      select: {
+        clienteId: true,
+        monto: true,
+        cobros: { select: { monto: true } },
+        _count: { select: { cuotas: true } },
+      },
     });
     if (!trabajo) return { error: "Ese trabajo ya no existe." };
     if (trabajo._count.cuotas > 0) {
       return { error: "Este trabajo ya tiene un plan de cuotas. Borralo para rehacerlo." };
     }
-    if (trabajo._count.cobros > 0) {
-      return { error: "Este trabajo ya tiene cobros sueltos: el plan de cuotas es para dividir un trabajo desde cero." };
+
+    // El plan cubre lo que FALTA cobrar, no el monto entero: así se puede armar aunque
+    // ya haya un anticipo cargado.
+    const cobrado = trabajo.cobros.reduce((acc, c) => acc + c.monto, 0);
+    const pendiente = trabajo.monto - cobrado;
+    if (pendiente <= 0) {
+      return { error: "Este trabajo ya está cobrado por completo: no hay nada para dividir." };
+    }
+
+    let montos: number[];
+    if (modo === "iguales") {
+      const cantidad = Number(String(formData.get("cantidad") ?? "").trim());
+      if (!Number.isInteger(cantidad) || cantidad < 2 || cantidad > 60) {
+        return { errores: { cantidad: ["Tiene que ser un número entero entre 2 y 60."] } };
+      }
+      montos = dividirEnCuotas(pendiente, cantidad);
+    } else {
+      montos = formData.getAll("montoCuota").map(centavosDe);
+      if (montos.length < 2 || montos.length > 60) {
+        return { error: "Un plan a mano necesita entre 2 y 60 cuotas." };
+      }
+      if (montos.some((n) => !Number.isFinite(n) || n <= 0)) {
+        return { error: "Cada cuota tiene que ser un monto mayor a 0." };
+      }
+      const suma = montos.reduce((acc, n) => acc + n, 0);
+      if (suma !== pendiente) {
+        return {
+          error: `Las cuotas suman ${formatearUSD(suma)} y tienen que sumar lo pendiente: ${formatearUSD(pendiente)}.`,
+        };
+      }
     }
 
     await tx.cuota.createMany({
-      data: dividirEnCuotas(trabajo.monto, cantidad).map((monto, i) => ({
+      data: montos.map((monto, i) => ({
         trabajoId,
         numero: i + 1,
         monto,
@@ -485,53 +518,62 @@ export async function cobrarCuota(
   const { socioId } = await verificarSesion();
 
   const parsed = z
-    .object({ id: idRequerido, fecha, metodo })
-    .safeParse({ id: formData.get("id"), fecha: formData.get("fecha"), metodo: formData.get("metodo") });
+    .object({ id: idRequerido, monto: montoUSD, fecha, metodo })
+    .safeParse({
+      id: formData.get("id"),
+      monto: formData.get("monto"),
+      fecha: formData.get("fecha"),
+      metodo: formData.get("metodo"),
+    });
   if (!parsed.success) return erroresDe(parsed.error);
 
-  const { id, fecha: fechaCobro, metodo: metodoCobro } = parsed.data;
+  const { id, monto, fecha: fechaCobro, metodo: metodoCobro } = parsed.data;
 
-  // Marcar la cuota + crear el Cobro van juntos: si quedaran sueltos, dos clicks
-  // simultáneos crearían dos cobros para la misma cuota y sobrecobrarían el trabajo.
+  // Imputar el cobro a la cuota va en una transacción: chequeo de saldo y create tienen
+  // que ser atómicos para que dos cobros simultáneos no sobrepasen la cuota.
   const resultado = await prisma.$transaction(async (tx): Promise<Resultado> => {
     const cuota = await tx.cuota.findUnique({
       where: { id },
       select: {
         monto: true,
         numero: true,
-        cobroId: true,
+        cobros: { select: { monto: true } },
         trabajo: {
           select: { id: true, clienteId: true, monto: true, cobros: { select: { monto: true } } },
         },
       },
     });
     if (!cuota) return { error: "Esa cuota ya no existe." };
-    if (cuota.cobroId) return { error: "Esa cuota ya está cobrada." };
 
     // El cobro se valida contra SU mes, no el del trabajo: cobrar una cuota de un mes ya
     // cerrado no debería reabrirlo.
     const bloqueo = await mesBloqueado(tx, fechaCobro);
     if (bloqueo) return { errores: { fecha: [bloqueo] } };
 
-    const cobrado = cuota.trabajo.cobros.reduce((acc, c) => acc + c.monto, 0);
-    const pendiente = cuota.trabajo.monto - cobrado;
-    if (cuota.monto > pendiente) {
-      return {
-        error: `La cuota ${cuota.numero} (${formatearUSD(cuota.monto)}) supera el saldo del trabajo: quedan ${formatearUSD(pendiente)}.`,
-      };
+    const cuotaPendiente = cuota.monto - cuota.cobros.reduce((acc, c) => acc + c.monto, 0);
+    if (cuotaPendiente <= 0) return { error: `La cuota ${cuota.numero} ya está saldada.` };
+    if (monto > cuotaPendiente) {
+      return { errores: { monto: [`A la cuota ${cuota.numero} le faltan ${formatearUSD(cuotaPendiente)}.`] } };
     }
 
-    const cobro = await tx.cobro.create({
+    // Guarda de sobrecobro del trabajo entero, por si hubo cobros sueltos aparte del plan.
+    const trabajoPendiente =
+      cuota.trabajo.monto - cuota.trabajo.cobros.reduce((acc, c) => acc + c.monto, 0);
+    if (monto > trabajoPendiente) {
+      return { errores: { monto: [`Supera el saldo del trabajo: quedan ${formatearUSD(trabajoPendiente)}.`] } };
+    }
+
+    await tx.cobro.create({
       data: {
         trabajoId: cuota.trabajo.id,
-        monto: cuota.monto,
+        cuotaId: id,
+        monto,
         fecha: fechaCobro,
         metodo: metodoCobro,
         notas: `Cuota ${cuota.numero}`,
         cargadoPorId: socioId,
       },
     });
-    await tx.cuota.update({ where: { id }, data: { cobroId: cobro.id } });
     return { ok: true, clienteId: cuota.trabajo.clienteId };
   });
 
@@ -555,9 +597,11 @@ export async function borrarPlanCuotas(
     });
     if (!trabajo) return { error: "Ese trabajo ya no existe." };
 
-    // Solo las pendientes: una cuota cobrada tiene un Cobro real detrás. Para sacarla,
-    // borrá el cobro (que la reabre por la FK SetNull) y recién ahí desaparece del plan.
-    await tx.cuota.deleteMany({ where: { trabajoId: parsed.data.trabajoId, cobroId: null } });
+    // Solo las cuotas sin ningún cobro imputado: si una ya recibió plata, para sacarla
+    // primero hay que borrar ese cobro (que la reabre).
+    await tx.cuota.deleteMany({
+      where: { trabajoId: parsed.data.trabajoId, cobros: { none: {} } },
+    });
     return { ok: true, clienteId: trabajo.clienteId };
   });
 

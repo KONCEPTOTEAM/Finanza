@@ -104,19 +104,23 @@ model Cobro {
   cargadoPor   Socio?  @relation("CobroCargadoPor", fields: [cargadoPorId], references: [id])
   cargadoPorId String?
 
-  // Si este cobro salda una cuota de un plan (lado inverso; la FK vive en Cuota).
-  cuota Cuota?
+  // Si este cobro se imputó a una cuota de un plan de pago. Varios cobros pueden ir a
+  // la misma cuota (pagos parciales); la FK vive acá.
+  cuota   Cuota?  @relation(fields: [cuotaId], references: [id], onDelete: SetNull)
+  cuotaId String?
 
   @@index([fecha])
   @@index([trabajoId])
+  @@index([cuotaId])
 }
 
 // ---------------------------------------------------------------------------
 // Cuotas: plan de pago de un trabajo. Es SOLO un cronograma, no es plata.
 //
-// Una cuota no toca la caja: recién al cobrarla se crea un Cobro real (que sí
-// mueve la caja) y se linkea acá. cobroId = null => pendiente. Si ese Cobro se
-// borra, la FK es SetNull y la cuota vuelve a pendiente sola.
+// Una cuota no toca la caja. Los cobros se le imputan (0..N por cuota), y su estado
+// se DERIVA: cobrado = suma de sus cobros; pendiente/parcial/cobrada según cuánto
+// falte. Al borrar un cobro, la cuota se reabre sola (baja su cobrado). Al borrar
+// una cuota, sus cobros sobreviven con cuotaId = null (la FK es SetNull).
 // ---------------------------------------------------------------------------
 
 model Cuota {
@@ -127,8 +131,7 @@ model Cuota {
   numero      Int
   monto       Int
   vencimiento DateTime
-  cobro       Cobro?   @relation(fields: [cobroId], references: [id], onDelete: SetNull)
-  cobroId     String?  @unique
+  cobros      Cobro[]
   creadoEn    DateTime @default(now())
 
   @@index([trabajoId])
